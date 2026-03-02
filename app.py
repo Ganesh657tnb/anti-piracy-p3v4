@@ -34,6 +34,17 @@ def extract_audio(video_path, out_wav):
         out_wav
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+def merge_audio(video_path, audio_path, out_video):
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-i", audio_path,
+        "-c:v", "copy",
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        out_video
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 def embed_watermark(audio, watermark):
     audio = audio.copy()
     for i in range(0, len(watermark)*100, 100):
@@ -52,9 +63,9 @@ def extract_watermark(audio, length):
 if "user" not in st.session_state:
     st.session_state.user = None
 
-# -------------------- AUTH --------------------
-st.title("🎧 Inaudible Audio Watermarking – OTT Anti-Piracy")
+st.title("🎧 Inaudible Audio Watermarking – OTT Anti-Piracy System")
 
+# -------------------- AUTH --------------------
 if st.session_state.user is None:
     tab1, tab2 = st.tabs(["Login", "Register"])
 
@@ -63,8 +74,10 @@ if st.session_state.user is None:
         p = st.text_input("Password", type="password", key="lp")
 
         if st.button("Login"):
-            c.execute("SELECT * FROM users WHERE username=? AND password=?",
-                      (u, hash_password(p)))
+            c.execute(
+                "SELECT * FROM users WHERE username=? AND password=?",
+                (u, hash_password(p))
+            )
             r = c.fetchone()
             if r:
                 st.session_state.user = r
@@ -75,14 +88,16 @@ if st.session_state.user is None:
     with tab2:
         ru = st.text_input("Username", key="ru")
         rp = st.text_input("Password", type="password", key="rp")
-        ph = st.text_input("Phone", key="ph")
+        ph = st.text_input("Phone number", key="ph")
 
         if st.button("Register"):
             try:
-                c.execute("INSERT INTO users (username,password,phone) VALUES (?,?,?)",
-                          (ru, hash_password(rp), ph))
+                c.execute(
+                    "INSERT INTO users (username,password,phone) VALUES (?,?,?)",
+                    (ru, hash_password(rp), ph)
+                )
                 conn.commit()
-                st.success("Registered! Login now.")
+                st.success("Registered successfully. Login now.")
             except:
                 st.error("Username already exists")
 
@@ -95,56 +110,79 @@ else:
 
     # -------- WATERMARK --------
     with tabs[0]:
-        st.header("Embed Watermark")
-        vid = st.file_uploader("Upload Video", type=["mp4","mkv","avi"])
+        st.header("Embed Watermark into Video")
+        vid = st.file_uploader(
+            "Upload original video",
+            type=["mp4", "mkv", "avi"]
+        )
 
         if vid:
             with tempfile.TemporaryDirectory() as tmp:
-                vpath = os.path.join(tmp, "v.mp4")
-                wpath = os.path.join(tmp, "a.wav")
+                video_path = os.path.join(tmp, "input.mp4")
+                audio_path = os.path.join(tmp, "audio.wav")
+                wm_audio_path = os.path.join(tmp, "wm_audio.wav")
+                out_video = os.path.join(tmp, "watermarked_video.mp4")
 
-                with open(vpath, "wb") as f:
+                with open(video_path, "wb") as f:
                     f.write(vid.read())
 
-                extract_audio(vpath, wpath)
-                audio, sr = sf.read(wpath)
+                extract_audio(video_path, audio_path)
+                audio, sr = sf.read(audio_path)
 
-                wm = format(uid, "016b") * 5   # repetition = trim resistant
-                wm_audio = embed_watermark(audio, wm)
+                watermark_bits = format(uid, "016b") * 5
+                wm_audio = embed_watermark(audio, watermark_bits)
 
-                out = os.path.join(tmp, "watermarked.wav")
-                sf.write(out, wm_audio, sr)
+                sf.write(wm_audio_path, wm_audio, sr)
 
-                st.audio(out)
-                st.success("Watermark embedded (User ID linked)")
-                st.download_button("Download Watermarked Audio",
-                                   open(out,"rb"), "watermarked.wav")
+                merge_audio(video_path, wm_audio_path, out_video)
+
+                st.success("Watermarked video created")
+                st.video(out_video)
+                st.download_button(
+                    "Download Watermarked Video",
+                    open(out_video, "rb"),
+                    "watermarked_video.mp4"
+                )
 
     # -------- DETECT --------
     with tabs[1]:
-        st.header("Detect Watermark")
-        aud = st.file_uploader("Upload Watermarked WAV", type=["wav"])
+        st.header("Detect Watermark from Video")
+        det_vid = st.file_uploader(
+            "Upload suspected video",
+            type=["mp4", "mkv", "avi"]
+        )
 
-        if aud:
-            audio, sr = sf.read(aud)
-            bits = extract_watermark(audio, 16)
-            detected_id = int(bits[:16], 2)
+        if det_vid:
+            with tempfile.TemporaryDirectory() as tmp:
+                vpath = os.path.join(tmp, "detect.mp4")
+                apath = os.path.join(tmp, "detect.wav")
 
-            c.execute("SELECT username, phone FROM users WHERE id=?",
-                      (detected_id,))
-            r = c.fetchone()
+                with open(vpath, "wb") as f:
+                    f.write(det_vid.read())
 
-            if r:
-                st.success("Watermark detected")
-                st.write("User ID:", detected_id)
-                st.write("Username:", r[0])
-                st.write("Phone:", r[1])
-            else:
-                st.error("Invalid / corrupted watermark")
+                extract_audio(vpath, apath)
+                audio, sr = sf.read(apath)
+
+                bits = extract_watermark(audio, 16)
+                detected_id = int(bits[:16], 2)
+
+                c.execute(
+                    "SELECT username, phone FROM users WHERE id=?",
+                    (detected_id,)
+                )
+                r = c.fetchone()
+
+                if r:
+                    st.success("✅ Watermark detected")
+                    st.write("User ID:", detected_id)
+                    st.write("Username:", r[0])
+                    st.write("Phone:", r[1])
+                else:
+                    st.error("❌ No valid watermark found")
 
     # -------- USER INFO --------
     with tabs[2]:
-        st.header("My Info")
+        st.header("My Account")
         st.write("User ID:", user[0])
         st.write("Username:", user[1])
         st.write("Phone:", user[3])
