@@ -1,5 +1,6 @@
 streamlit
 numpy
 scipy
-soundfile
-cryptography
+pandas
+bcrypt
+pycryptodome
