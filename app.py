@@ -13,7 +13,7 @@ import hashlib
 # ---------------- CONFIG ----------------
 DB_NAME = "guardian.db"
 UPLOAD_DIR = "master_videos"
-HMAC_KEY = b"guardian_secret_key"
+HMAC_KEY = b"guardian_secret_key"  # keep secret
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -150,11 +150,12 @@ def main():
         st.session_state.uid = None
         st.rerun()
 
+    # ---------- MAIN TABS ----------
     tab1, tab2, tab3 = st.tabs(
-        ["📚 Library", "📤 Upload", "🔍 Detector"]
+        ["📚 Shared Library", "📤 Upload Content", "👥 Users Info"]
     )
 
-    # ---------- TAB 1 ----------
+    # ---------- TAB 1: LIBRARY ----------
     with tab1:
         st.header("Available Videos")
         conn = sqlite3.connect(DB_NAME)
@@ -190,10 +191,15 @@ def main():
                             key=f"save_{fname}"
                         )
 
-    # ---------- TAB 2 ----------
+    # ---------- TAB 2: UPLOAD ----------
     with tab2:
         st.header("Upload Master Video")
-        up = st.file_uploader("Select video", type=["mp4", "mkv", "mov"], key="upload_vid")
+        up = st.file_uploader(
+            "Select video",
+            type=["mp4", "mkv", "mov"],
+            key="upload_vid"
+        )
+
         if up and st.button("Upload", key="upload_btn"):
             path = os.path.join(UPLOAD_DIR, up.name)
             with open(path, "wb") as f:
@@ -208,9 +214,32 @@ def main():
             conn.close()
             st.success("Uploaded successfully")
 
-    # ---------- TAB 3 ----------
+    # ---------- TAB 3: USERS INFO ----------
     with tab3:
-        st.info("Forensic detection handled by separate detector app.")
+        st.header("Registered Users")
 
+        conn = sqlite3.connect(DB_NAME)
+        df = pd.read_sql_query(
+            "SELECT id, username, email, phone FROM users",
+            conn
+        )
+        conn.close()
+
+        if df.empty:
+            st.info("No users found.")
+        else:
+            st.dataframe(df, use_container_width=True)
+            st.write(f"**Total Users:** {len(df)}")
+
+            st.divider()
+            if st.button("⚠️ Delete ALL Users", key="wipe_users"):
+                conn = sqlite3.connect(DB_NAME)
+                conn.execute("DELETE FROM users")
+                conn.commit()
+                conn.close()
+                st.warning("All user data deleted.")
+                st.rerun()
+
+# ---------------- RUN ----------------
 if __name__ == "__main__":
     main()
