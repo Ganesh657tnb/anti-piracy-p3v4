@@ -1,147 +1,156 @@
-import os
-import sqlite3
-import tempfile
-import subprocess
 import streamlit as st
+import sqlite3
+import hashlib
 import numpy as np
+import subprocess
+import tempfile
+import os
 import soundfile as sf
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
 
-# ------------------ CONFIG ------------------
-AES_KEY = b'1234567890abcdef'  # 16 bytes = AES-128
-DB_NAME = "users.db"
+# -------------------- DATABASE --------------------
+conn = sqlite3.connect("users.db", check_same_thread=False)
+c = conn.cursor()
 
-# ------------------ DATABASE ------------------
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            password TEXT,
-            phone TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+c.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    password TEXT,
+    phone TEXT
+)
+""")
+conn.commit()
 
-init_db()
+# -------------------- HELPERS --------------------
+def hash_password(p):
+    return hashlib.sha256(p.encode()).hexdigest()
 
-# ------------------ AES ------------------
-def aes_encrypt(data: bytes) -> bytes:
-    cipher = Cipher(algorithms.AES(AES_KEY), modes.ECB(), backend=default_backend())
-    encryptor = cipher.encryptor()
-    padded = data + b' ' * (16 - len(data) % 16)
-    return encryptor.update(padded) + encryptor.finalize()
+def extract_audio(video_path, out_wav):
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-vn", "-ac", "1",
+        "-ar", "44100",
+        out_wav
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-def aes_decrypt(data: bytes) -> bytes:
-    cipher = Cipher(algorithms.AES(AES_KEY), modes.ECB(), backend=default_backend())
-    decryptor = cipher.decryptor()
-    return decryptor.update(data) + decryptor.finalize()
-
-# ------------------ WATERMARK ------------------
-def embed_watermark(audio, user_id):
-    binary = format(user_id, '016b')
-    watermark = np.array([1 if b == '1' else -1 for b in binary])
-    audio[:len(watermark)] += watermark * 0.0005
+def embed_watermark(audio, watermark):
+    audio = audio.copy()
+    for i in range(0, len(watermark)*100, 100):
+        idx = i % len(audio)
+        audio[idx] += 0.0005 if watermark[i//100] == "1" else -0.0005
     return audio
 
-def extract_watermark(audio):
-    segment = audio[:16]
-    bits = ['1' if x > 0 else '0' for x in segment]
-    return int("".join(bits), 2)
+def extract_watermark(audio, length):
+    bits = []
+    for i in range(0, length*100, 100):
+        idx = i % len(audio)
+        bits.append("1" if audio[idx] > 0 else "0")
+    return "".join(bits)
 
-# ------------------ FFMPEG ------------------
-def extract_audio(video_path, wav_path):
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
-        "-vn", "-acodec", "pcm_s16le",
-        wav_path
-    ], check=True)
+# -------------------- SESSION --------------------
+if "user" not in st.session_state:
+    st.session_state.user = None
 
-# ------------------ STREAMLIT UI ------------------
-st.set_page_config("OTT Watermarking", layout="wide")
-st.title("🎬 Inaudible Audio Watermarking for OTT Platforms")
+# -------------------- AUTH --------------------
+st.title("🎧 Inaudible Audio Watermarking – OTT Anti-Piracy")
 
-tabs = st.tabs(["🔐 Login", "🎥 Watermark Video", "🕵️ Detect Watermark", "👤 User Info"])
+if st.session_state.user is None:
+    tab1, tab2 = st.tabs(["Login", "Register"])
 
-# ------------------ LOGIN ------------------
-with tabs[0]:
-    st.subheader("Login / Register")
+    with tab1:
+        u = st.text_input("Username", key="lu")
+        p = st.text_input("Password", type="password", key="lp")
 
-    username = st.text_input("Username", key="login_user")
-    password = st.text_input("Password", type="password", key="login_pass")
-    phone = st.text_input("Phone", key="login_phone")
+        if st.button("Login"):
+            c.execute("SELECT * FROM users WHERE username=? AND password=?",
+                      (u, hash_password(p)))
+            r = c.fetchone()
+            if r:
+                st.session_state.user = r
+                st.rerun()
+            else:
+                st.error("Invalid login")
 
-    if st.button("Register"):
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("INSERT INTO users(username,password,phone) VALUES(?,?,?)",
-                  (username, password, phone))
-        conn.commit()
-        conn.close()
-        st.success("Registered successfully")
+    with tab2:
+        ru = st.text_input("Username", key="ru")
+        rp = st.text_input("Password", type="password", key="rp")
+        ph = st.text_input("Phone", key="ph")
 
-    if st.button("Login"):
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("SELECT id FROM users WHERE username=? AND password=?",
-                  (username, password))
-        row = c.fetchone()
-        conn.close()
-        if row:
-            st.session_state.user_id = row[0]
-            st.success(f"Logged in as User ID {row[0]}")
-        else:
-            st.error("Invalid credentials")
+        if st.button("Register"):
+            try:
+                c.execute("INSERT INTO users (username,password,phone) VALUES (?,?,?)",
+                          (ru, hash_password(rp), ph))
+                conn.commit()
+                st.success("Registered! Login now.")
+            except:
+                st.error("Username already exists")
 
-# ------------------ WATERMARK ------------------
-with tabs[1]:
-    if "user_id" not in st.session_state:
-        st.warning("Login first")
-    else:
-        video = st.file_uploader("Upload Video", type=["mp4", "mkv", "avi", "mov"])
-        if video:
+# -------------------- MAIN APP --------------------
+else:
+    user = st.session_state.user
+    uid = user[0]
+
+    tabs = st.tabs(["Watermark Video", "Detect Watermark", "User Info", "Logout"])
+
+    # -------- WATERMARK --------
+    with tabs[0]:
+        st.header("Embed Watermark")
+        vid = st.file_uploader("Upload Video", type=["mp4","mkv","avi"])
+
+        if vid:
             with tempfile.TemporaryDirectory() as tmp:
-                vpath = os.path.join(tmp, video.name)
-                wav = os.path.join(tmp, "audio.wav")
+                vpath = os.path.join(tmp, "v.mp4")
+                wpath = os.path.join(tmp, "a.wav")
 
                 with open(vpath, "wb") as f:
-                    f.write(video.read())
+                    f.write(vid.read())
 
-                extract_audio(vpath, wav)
-                audio, sr = sf.read(wav)
+                extract_audio(vpath, wpath)
+                audio, sr = sf.read(wpath)
 
-                wm_audio = embed_watermark(audio.copy(), st.session_state.user_id)
-                out_wav = os.path.join(tmp, "watermarked.wav")
-                sf.write(out_wav, wm_audio, sr)
+                wm = format(uid, "016b") * 5   # repetition = trim resistant
+                wm_audio = embed_watermark(audio, wm)
 
-                st.success("Watermark embedded")
-                st.audio(out_wav)
+                out = os.path.join(tmp, "watermarked.wav")
+                sf.write(out, wm_audio, sr)
 
-# ------------------ DETECT ------------------
-with tabs[2]:
-    wav = st.file_uploader("Upload Extracted WAV", type=["wav"])
-    if wav:
-        audio, _ = sf.read(wav)
-        uid = extract_watermark(audio)
+                st.audio(out)
+                st.success("Watermark embedded (User ID linked)")
+                st.download_button("Download Watermarked Audio",
+                                   open(out,"rb"), "watermarked.wav")
 
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("SELECT username, phone FROM users WHERE id=?", (uid,))
-        row = c.fetchone()
-        conn.close()
+    # -------- DETECT --------
+    with tabs[1]:
+        st.header("Detect Watermark")
+        aud = st.file_uploader("Upload Watermarked WAV", type=["wav"])
 
-        if row:
-            st.success(f"Watermark Owner: {row[0]} | Phone: {row[1]}")
-        else:
-            st.error("Watermark detected but user not found")
+        if aud:
+            audio, sr = sf.read(aud)
+            bits = extract_watermark(audio, 16)
+            detected_id = int(bits[:16], 2)
 
-# ------------------ USER INFO ------------------
-with tabs[3]:
-    conn = sqlite3.connect(DB_NAME)
-    users = conn.execute("SELECT * FROM users").fetchall()
-    conn.close()
-    st.table(users)
+            c.execute("SELECT username, phone FROM users WHERE id=?",
+                      (detected_id,))
+            r = c.fetchone()
+
+            if r:
+                st.success("Watermark detected")
+                st.write("User ID:", detected_id)
+                st.write("Username:", r[0])
+                st.write("Phone:", r[1])
+            else:
+                st.error("Invalid / corrupted watermark")
+
+    # -------- USER INFO --------
+    with tabs[2]:
+        st.header("My Info")
+        st.write("User ID:", user[0])
+        st.write("Username:", user[1])
+        st.write("Phone:", user[3])
+
+    # -------- LOGOUT --------
+    with tabs[3]:
+        if st.button("Logout"):
+            st.session_state.user = None
+            st.rerun()
