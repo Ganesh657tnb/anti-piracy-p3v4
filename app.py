@@ -11,7 +11,7 @@ from Crypto.Util.Padding import pad
 
 # ---------------- CONFIG ----------------
 DB_PATH = "watermark.db"
-AES_KEY = b"this_is_16_bytes"
+AES_KEY = b"this_is_16_bytes"   # AES-128
 AES_IV  = b"this_is_16_bytes"
 PN_SEED = 42
 # --------------------------------------
@@ -23,15 +23,28 @@ st.set_page_config(page_title="AES DSSS Watermarking", layout="wide")
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+
+    # Create table if not exists (basic)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE,
-            email TEXT,
-            password BLOB,
-            aes_cipher BLOB
+            email TEXT
         )
     """)
+
+    # ---- SAFE MIGRATIONS ----
+    existing_cols = [c[1] for c in cur.execute("PRAGMA table_info(users)")]
+
+    if "phone" not in existing_cols:
+        cur.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+
+    if "password" not in existing_cols:
+        cur.execute("ALTER TABLE users ADD COLUMN password BLOB")
+
+    if "aes_cipher" not in existing_cols:
+        cur.execute("ALTER TABLE users ADD COLUMN aes_cipher BLOB")
+
     conn.commit()
     conn.close()
 
@@ -90,7 +103,7 @@ def merge_audio(video, audio, out):
         "-shortest", out
     ], check=True)
 
-# ---------- AUTH ----------
+# ---------- AUTH SESSION ----------
 
 if "user_id" not in st.session_state:
     st.session_state.user_id = None
@@ -108,12 +121,13 @@ if st.session_state.user_id is None:
 
         if st.button("Login"):
             conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            cur.execute("SELECT user_id, password FROM users WHERE username=?", (u,))
-            row = cur.fetchone()
+            row = conn.execute(
+                "SELECT user_id, password FROM users WHERE username=?",
+                (u,)
+            ).fetchone()
             conn.close()
 
-            if row and bcrypt.checkpw(p.encode(), row[1]):
+            if row and row[1] and bcrypt.checkpw(p.encode(), row[1]):
                 st.session_state.user_id = row[0]
                 st.rerun()
             else:
@@ -122,23 +136,23 @@ if st.session_state.user_id is None:
     with tab2:
         ru = st.text_input("Username", key="reg_u")
         re = st.text_input("Email", key="reg_e")
-        rp = st.text_input("Password", type="password", key="reg_p")
+        rp = st.text_input("Phone Number", key="reg_ph")
+        rpw = st.text_input("Password", type="password", key="reg_p")
 
         if st.button("Register"):
-            if not (ru and re and rp):
-                st.error("All fields required")
+            if not (ru and re and rp and rpw):
+                st.error("All fields are required")
             else:
-                hp = bcrypt.hashpw(rp.encode(), bcrypt.gensalt())
+                hp = bcrypt.hashpw(rpw.encode(), bcrypt.gensalt())
                 try:
                     conn = sqlite3.connect(DB_PATH)
-                    cur = conn.cursor()
-                    cur.execute(
-                        "INSERT INTO users (username,email,password) VALUES (?,?,?)",
-                        (ru, re, hp)
-                    )
+                    conn.execute("""
+                        INSERT INTO users (username,email,phone,password)
+                        VALUES (?,?,?,?)
+                    """, (ru, re, rp, hp))
                     conn.commit()
                     conn.close()
-                    st.success("Registration successful! Login now.")
+                    st.success("Registration successful. Please login.")
                 except sqlite3.IntegrityError:
                     st.error("Username already exists")
 
@@ -156,10 +170,10 @@ tab1, tab2 = st.tabs(["🎬 Watermark Video", "👥 Users"])
 # ---------- WATERMARK ----------
 
 with tab1:
-    st.header("Encrypt & Watermark Video")
+    st.header("AES-128 Watermarking")
     video = st.file_uploader("Upload Video", type=["mp4", "mkv", "avi"])
 
-    if st.button("Watermark"):
+    if st.button("Encrypt & Watermark"):
         if not video:
             st.error("Upload a video")
         else:
@@ -168,14 +182,12 @@ with tab1:
                 with open(in_v, "wb") as f:
                     f.write(video.read())
 
-                audio = os.path.join(tmp, "audio.wav")
-                extract_audio(in_v, audio)
+                wav = os.path.join(tmp, "audio.wav")
+                extract_audio(in_v, wav)
 
-                with wave.open(audio, "rb") as w:
+                with wave.open(wav, "rb") as w:
                     params = w.getparams()
-                    samples = np.frombuffer(
-                        w.readframes(w.getnframes()), dtype=np.int16
-                    )
+                    samples = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
 
                 cipher = aes_encrypt_user_id(st.session_state.user_id)
 
@@ -190,16 +202,16 @@ with tab1:
                 bits = bytes_to_bits(cipher)
                 wm_audio = embed_dsss(samples, bits)
 
-                out_audio = os.path.join(tmp, "wm.wav")
-                with wave.open(out_audio, "wb") as w:
+                out_wav = os.path.join(tmp, "wm.wav")
+                with wave.open(out_wav, "wb") as w:
                     w.setparams(params)
                     w.writeframes(wm_audio.tobytes())
 
                 out_v = os.path.join(tmp, "watermarked.mp4")
-                merge_audio(in_v, out_audio, out_v)
+                merge_audio(in_v, out_wav, out_v)
 
                 with open(out_v, "rb") as f:
-                    st.success("✅ Watermark Embedded")
+                    st.success("✅ Watermark embedded successfully")
                     st.download_button("Download Video", f, "watermarked.mp4")
 
 # ---------- USERS TAB ----------
@@ -207,7 +219,7 @@ with tab1:
 with tab2:
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT user_id, username, email FROM users"
+        "SELECT user_id, username, email, phone FROM users"
     ).fetchall()
     conn.close()
 
